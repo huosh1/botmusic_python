@@ -5,7 +5,12 @@ It can play music from **YouTube**, **SoundCloud**, or local MP3 files, using **
 
 ## 🌐 Add the bot to your server
 
-👉 [Click here to invite](https://huoshi.pythonanywhere.com/bot)
+
+<p align="center">
+  <a href="https://huoshi.pythonanywhere.com/bot">
+    <img src="https://img.shields.io/badge/Invite%20my%20Bot-%235865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Invite Discord Bot"/>
+  </a>
+</p>
 
 ---
 
