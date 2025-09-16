@@ -3,6 +3,10 @@
 A simple **Discord music bot** supporting **multiple servers at the same time**.  
 It can play music from **YouTube**, **SoundCloud**, or local MP3 files, using **FFmpeg** and **yt-dlp**.
 
+## 🌐 Add the bot to your server
+
+👉 [Click here to invite](https://huoshi.pythonanywhere.com/bot)
+
 ---
 
 ## 🚀 Features
@@ -64,18 +68,6 @@ sudo apt install -y ffmpeg
 
 ---
 
-## 🔑 Configuration
-
-Edit `multibot.py` and replace:
-
-```python
-TOKEN = "YOUR_DISCORD_BOT_TOKEN"
-```
-
-with your bot token from the [Discord Developer Portal](https://discord.com/developers/applications).
-
----
-
 ## ▶️ Usage
 
 Run manually (inside venv):
@@ -84,35 +76,6 @@ Run manually (inside venv):
 python3 multibot.py
 ```
 
-Or install as a systemd service for auto-restart:
-
-`/etc/systemd/system/multibot.service` :
-
-```ini
-[Unit]
-Description=Discord Multi Music Bot
-After=network.target
-
-[Service]
-Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/bot-multi
-Environment=PATH=/home/ubuntu/bot-multi/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/home/ubuntu/bot-multi/.venv/bin/python multibot.py
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start:
-
-```bash
-sudo systemctl daemon-reexec
-sudo systemctl enable multibot.service
-sudo systemctl start multibot.service
-```
 
 ---
 
@@ -135,7 +98,4 @@ sudo systemctl start multibot.service
 !test_ffmpeg         → Check FFmpeg installation
 ```
 
-## 🌐 Add the bot to your server
-
-👉 [Click here to invite](https://huoshi.pythonanywhere.com/bot)
 
