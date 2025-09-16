@@ -1,0 +1,19 @@
+# /etc/systemd/system/multibot.service
+[Unit]
+Description=Discord Multi Music Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/bot-multi
+Environment=PATH=/home/ubuntu/bot-multi/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/home/ubuntu/bot-multi/.env
+ExecStart=/home/ubuntu/bot-multi/.venv/bin/python multibot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
