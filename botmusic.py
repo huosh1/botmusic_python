@@ -36,82 +36,156 @@ ffmpeg_options = {
     'options': '-vn'
 }
 
+
+
 class MusicBot:
     def __init__(self):
-        self.voice_client = None
-        self.current_song = None
+        self.voice_client: discord.VoiceClient | None = None
+        self.current_song: str | None = None
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.player_task: asyncio.Task | None = None
+        self.next_event: asyncio.Event | None = None
+        self.stopped = False  # pour !stop qui vide la queue
 
     async def join_channel(self, ctx):
         """Rejoindre le canal vocal de l'utilisateur"""
         if ctx.author.voice is None:
             await ctx.send("Tu dois être dans un canal vocal !")
             return False
-        
+
         channel = ctx.author.voice.channel
         if self.voice_client is None:
             self.voice_client = await channel.connect()
         elif self.voice_client.channel != channel:
             await self.voice_client.move_to(channel)
-        
         return True
 
-    async def play_file(self, ctx, file_path):
-        """Jouer un fichier MP3 local"""
-        if not os.path.exists(file_path):
-            await ctx.send(f"❌ Fichier non trouvé : {file_path}")
-            return
-        
-        if not await self.join_channel(ctx):
-            return
-        
-        try:
+    async def ensure_player(self, ctx):
+        """Démarre la task lecteur si pas encore lancée"""
+        if self.player_task is None or self.player_task.done():
+            self.stopped = False
+            self.player_task = asyncio.create_task(self.player_loop(ctx))
+
+    async def enqueue_stream(self, title: str, stream_url: str):
+        """Ajoute un flux (déjà résolu) à la queue"""
+        await self.queue.put({"title": title, "url": stream_url})
+
+    async def resolve_url(self, url: str):
+        """Résout un URL (track ou playlist) -> liste d'items (title, url)"""
+        results = []
+        # autoriser playlists pour la résolution
+        opts = ydl_opts.copy()
+        opts["noplaylist"] = False
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if info is None:
+                return results
+            if "entries" in info and info["entries"]:
+                for entry in info["entries"]:
+                    if not entry:
+                        continue
+                    title = entry.get("title", "Titre inconnu")
+                    stream_url = entry.get("url")
+                    if stream_url:
+                        results.append((title, stream_url))
+            else:
+                title = info.get("title", "Titre inconnu")
+                stream_url = info.get("url")
+                if stream_url:
+                    results.append((title, stream_url))
+        return results
+
+    async def player_loop(self, ctx):
+        """Lit en boucle tout ce qui arrive dans la queue"""
+        while not self.stopped:
+            item = await self.queue.get()  # attend si vide
+            title, stream_url = item["title"], item["url"]
+
+            # Si un morceau joue, stop pour enchaîner proprement
             if self.voice_client and self.voice_client.is_playing():
                 self.voice_client.stop()
-            
-            # Utiliser FFmpeg avec ou sans chemin spécifique
-            if FFMPEG_PATH:
-                source = discord.FFmpegPCMAudio(file_path, executable=FFMPEG_PATH, **ffmpeg_options)
-            else:
-                source = discord.FFmpegPCMAudio(file_path, **ffmpeg_options)
-            
-            if self.voice_client:
-                self.voice_client.play(source, after=lambda e: print(f'Player error: {e}') if e else None)
-                self.current_song = os.path.basename(file_path)
-                await ctx.send(f"🎵 Lecture en cours : {self.current_song}")
-                
-        except Exception as e:
-            await ctx.send(f"❌ Erreur lors de la lecture : {str(e)}")
+                await asyncio.sleep(0.5)
 
-    async def play_url(self, ctx, url):
-        """Jouer un lien SoundCloud/YouTube"""
-        if not await self.join_channel(ctx):
-            return
-        
-        await ctx.send("🔄 Téléchargement en cours...")
-        
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                title = info.get('title', 'Titre inconnu')
-                stream_url = info.get('url')
-                
-                if stream_url is None:
-                    await ctx.send("❌ Impossible de récupérer le lien audio")
-                    return
-                
-                if self.voice_client and self.voice_client.is_playing():
-                    self.voice_client.stop()
-                
+            try:
+                # Crée la source FFmpeg
                 if FFMPEG_PATH:
                     source = discord.FFmpegPCMAudio(stream_url, executable=FFMPEG_PATH, **ffmpeg_options)
                 else:
                     source = discord.FFmpegPCMAudio(stream_url, **ffmpeg_options)
-                
+
+                self.next_event = asyncio.Event()
+                self.current_song = title
+
+                def _after(err):
+                    # callback thread → on rebondit sur l’event loop
+                    if err:
+                        print(f"Player error: {err}")
+                    if self.next_event and not self.next_event.is_set():
+                        asyncio.run_coroutine_threadsafe(self._signal_next(), asyncio.get_event_loop())
+
                 if self.voice_client:
-                    self.voice_client.play(source, after=lambda e: print(f'Player error: {e}') if e else None)
-                    self.current_song = title
-                    await ctx.send(f"🎵 Lecture en cours : {title}")
-                
+                    self.voice_client.play(source, after=_after)
+                    await ctx.send(f"▶️ Lecture : {title}")
+
+                    # Attendre la fin
+                    while self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
+                        if self.next_event:
+                            try:
+                                await asyncio.wait_for(self.next_event.wait(), timeout=0.5)
+                            except asyncio.TimeoutError:
+                                pass
+                        else:
+                            await asyncio.sleep(0.5)
+
+            except Exception as e:
+                await ctx.send(f"❌ Erreur de lecture: {e}")
+
+            finally:
+                self.queue.task_done()
+                self.current_song = None
+
+    async def _signal_next(self):
+        if self.next_event and not self.next_event.is_set():
+            self.next_event.set()
+
+    async def play_file(self, ctx, file_path):
+        """Envoie un fichier local dans la queue"""
+        if not os.path.exists(file_path):
+            await ctx.send(f"❌ Fichier non trouvé : {file_path}")
+            return
+        if not await self.join_channel(ctx):
+            return
+        if self.voice_client is None:
+            return
+
+        # Convertit fichier local en stream ffmpeg (via file path)
+        title = os.path.basename(file_path)
+        await self.enqueue_stream(title, file_path)
+        await self.ensure_player(ctx)
+        await ctx.send(f"➕ Ajouté à la file : {title}")
+
+    async def play_url(self, ctx, url):
+        """Résout un lien (track OU playlist) et alimente la queue"""
+        if not await self.join_channel(ctx):
+            return
+        await ctx.send("🔄 Récupération du lien...")
+
+        try:
+            items = await self.resolve_url(url)
+            if not items:
+                await ctx.send("❌ Aucun flux audio trouvé")
+                return
+
+            # Empile tout (si playlist → plusieurs titres)
+            for title, stream_url in items:
+                await self.enqueue_stream(title, stream_url)
+
+            await self.ensure_player(ctx)
+            if len(items) == 1:
+                await ctx.send(f"➕ Ajouté à la file : {items[0][0]}")
+            else:
+                await ctx.send(f"🎶 **{len(items)}** titres ajoutés à la file")
+
         except Exception as e:
             error_msg = str(e).lower()
             if "private" in error_msg or "unavailable" in error_msg:
@@ -162,10 +236,21 @@ async def play(ctx, *, query):
 
 @bot.command(name='stop')
 async def stop(ctx):
-    """Arrêter la musique"""
-    if music_bot.voice_client and music_bot.voice_client.is_playing():
+    """Arrêter la musique et vider la file"""
+    music_bot.stopped = True
+    # vider la queue
+    try:
+        while not music_bot.queue.empty():
+            music_bot.queue.get_nowait()
+            music_bot.queue.task_done()
+    except Exception:
+        pass
+
+    if music_bot.voice_client and (music_bot.voice_client.is_playing() or music_bot.voice_client.is_paused()):
         music_bot.voice_client.stop()
-        await ctx.send("⏹️ Musique arrêtée")
+    await ctx.send("⏹️ Musique arrêtée et file vidée")
+
+
 
 @bot.command(name='pause')
 async def pause(ctx):
@@ -360,27 +445,168 @@ async def test_ffmpeg(ctx):
     except Exception as e:
         await ctx.send(f"❌ Erreur FFmpeg : {e}")
 
+
+@bot.command(name="playlist")
+async def playlist(ctx, url: str):
+    """Lire une playlist SoundCloud/YouTube entière"""
+    if not await music_bot.join_channel(ctx):
+        return
+
+    await ctx.send("🔄 Récupération de la playlist...")
+
+    try:
+        playlist_opts = ydl_opts.copy()
+        playlist_opts["noplaylist"] = False  # autoriser les playlists
+
+        with yt_dlp.YoutubeDL(playlist_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            # Si c’est une seule track, on force en liste
+            if "entries" not in info:
+                entries = [info]
+            else:
+                entries = info["entries"]
+
+            if not entries:
+                await ctx.send("❌ Playlist vide")
+                return
+
+            await ctx.send(f"🎶 Playlist trouvée : **{info.get('title','Sans titre')}** avec {len(entries)} morceaux")
+
+            # Boucler sur les tracks
+            for entry in entries:
+                if not entry:
+                    continue
+                title = entry.get("title", "Titre inconnu")
+                stream_url = entry.get("url")
+
+                if not stream_url:
+                    await ctx.send(f"⚠️ Impossible de lire {title}")
+                    continue
+
+                # Stop la musique actuelle s'il y en a une
+                if music_bot.voice_client and music_bot.voice_client.is_playing():
+                    music_bot.voice_client.stop()
+                    await asyncio.sleep(1)
+
+                # Lecture via FFmpeg
+                if FFMPEG_PATH:
+                    source = discord.FFmpegPCMAudio(stream_url, executable=FFMPEG_PATH, **ffmpeg_options)
+                else:
+                    source = discord.FFmpegPCMAudio(stream_url, **ffmpeg_options)
+
+                if music_bot.voice_client:
+                    music_bot.voice_client.play(source)
+                    music_bot.current_song = title
+                    await ctx.send(f"▶️ Lecture : {title}")
+
+                    # attendre la fin de la chanson
+                    while music_bot.voice_client.is_playing() or music_bot.voice_client.is_paused():
+                        await asyncio.sleep(2)
+
+    except Exception as e:
+        await ctx.send(f"❌ Erreur playlist : {e}")
+
+
+
+@bot.command(name="queue", aliases=["q"])
+async def show_queue(ctx):
+    """Afficher la file d'attente"""
+    if music_bot.current_song is None and music_bot.queue.empty():
+        await ctx.send("🧺 La file est vide.")
+        return
+
+    items = []
+    # ⚠️ On ne vide pas la vraie queue — on la lit sans consommer
+    if not music_bot.queue.empty():
+        try:
+            # snapshot non bloquant
+            size = music_bot.queue.qsize()
+            for _ in range(size):
+                item = music_bot.queue.get_nowait()
+                items.append(item)
+                music_bot.queue.put_nowait(item)  # on remet
+        except Exception:
+            pass
+
+    lines = []
+    if music_bot.current_song:
+        lines.append(f"🎵 **En cours** : {music_bot.current_song}")
+    for i, it in enumerate(items[:15], start=1):
+        lines.append(f"{i}. {it['title']}")
+
+    msg = "\n".join(lines) if lines else "🧺 La file est vide."
+    await ctx.send(f"**Queue :**\n```\n{msg}\n```")
+
+
+@bot.command(name="skip", aliases=["s"])
+async def skip(ctx):
+    """Passer au morceau suivant"""
+    if music_bot.voice_client and music_bot.voice_client.is_playing():
+        music_bot.voice_client.stop()
+        await ctx.send("⏭️ Skip")
+    else:
+        await ctx.send("Rien à passer.")
+
+
+@bot.command(name="clear")
+async def clear_queue(ctx):
+    """Vider la file d'attente"""
+    cleared = 0
+    try:
+        while not music_bot.queue.empty():
+            music_bot.queue.get_nowait()
+            music_bot.queue.task_done()
+            cleared += 1
+    except Exception:
+        pass
+    await ctx.send(f"🧹 File vidée ({cleared} éléments).")
+
+
+
 @bot.command(name='help_music')
 async def help_music(ctx):
-    """Afficher l'aide"""
+    """Afficher l'aide complète"""
     help_text = """
 🎵 **Commandes du bot musical** 🎵
 
-`!play <fichier>` - Jouer un fichier MP3 local (sans .mp3)
-`!play <url>` - Jouer depuis SoundCloud/YouTube
-`!list` - Voir tous les fichiers disponibles
-`!stop` - Arrêter la musique
-`!pause` - Mettre en pause
-`!resume` - Reprendre
-`!current` - Chanson actuelle
-`!leave` - Déconnecter le bot
-`!test_ffmpeg` - Tester FFmpeg
+**▶️ Lecture**
+`!play <fichier>`      → Ajouter un fichier MP3 local (sans .mp3)
+`!play <url>`          → Ajouter un lien SoundCloud/YouTube (track ou playlist)
+`!playlist <url>`      → Ajouter explicitement une playlist complète
+`!playforce <url>`     → Forcer la lecture avec options simplifiées
 
+**⏯️ Contrôle**
+`!pause`               → Mettre en pause
+`!resume`              → Reprendre
+`!skip` / `!s`         → Passer au morceau suivant
+`!stop`                → Arrêter et vider la file
+`!leave` / `!disconnect` → Déconnecter le bot du vocal
+`!volume <0-100>`      → Régler le volume
+
+**📋 File d’attente**
+`!queue` / `!q`        → Afficher la file en cours
+`!clear`               → Vider la file
+`!current` / `!now`    → Afficher la chanson actuelle
+
+**📂 Fichiers locaux**
+`!list` / `!ls`        → Lister les fichiers audio disponibles
+
+**🔧 Outils & Debug**
+`!formats <url>`       → Voir les formats audio disponibles
+`!debug <url>`         → Infos debug sur un lien
+`!test_ffmpeg`         → Vérifier que FFmpeg est fonctionnel
+
+---
 **Exemples :**
-`!play let` (pour let.mp3)
+`!play let` (joue let.mp3 dans ./music)
 `!play https://soundcloud.com/...`
+`!playlist https://soundcloud.com/user/sets/...`
     """
     await ctx.send(help_text)
+
+
+
 
 if __name__ == "__main__":
     # Remplace par ton token de bot Discord
