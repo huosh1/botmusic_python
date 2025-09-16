@@ -1,0 +1,8 @@
+# Discord + voix (installe aussi PyNaCl via l'extra [voice])
+discord.py[voice]>=2.3,<3.0
+
+# Téléchargement/stream des liens (YouTube, SoundCloud, etc.)
+yt-dlp>=2024.10.0
+
+# Utiles pour Python 3.8 (backports de hints)
+typing-extensions>=4.7
